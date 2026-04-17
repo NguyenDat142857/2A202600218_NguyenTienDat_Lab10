@@ -1,60 +1,113 @@
-# Data contract — Lab Day 10 (tiếp nối artifact CS + IT Helpdesk)
-# Sinh viên bổ sung owner, SLA freshness, và nguồn canonical.
-
 version: "1.0"
 dataset: "kb_chunk_export"
-owner_team: "__TODO__"
+owner_team: "C401-data-engineering"
 
 schema_cleaned:
   chunk_id:
     type: string
     required: true
-    description: "ID ổn định sau clean (thường hash hoặc doc_id + seq)"
+    description: "ID ổn định sau clean (hash(doc_id + chunk_index + normalized_text))"
+    
   doc_id:
     type: string
     required: true
-    description: "Khóa logic tài liệu nguồn (vd policy_refund_v4)"
+    description: "Khóa logic tài liệu nguồn (vd: policy_refund_v4)"
+    
   chunk_text:
     type: string
     required: true
     constraints:
       min_length: 8
+    description: "Nội dung sau cleaning + chunking"
+    
   effective_date:
     type: date
     required: true
+    description: "Ngày policy có hiệu lực (dùng cho canonical selection)"
+    
   exported_at:
     type: datetime
     required: true
+    description: "Thời điểm record được đưa vào pipeline"
+
+  run_id:
+    type: string
+    required: true
+    description: "ID phiên chạy pipeline để trace lineage"
+
+  source:
+    type: string
+    required: true
+    description: "Nguồn dữ liệu (csv | api | legacy | docs)"
 
 quality_rules:
   - id: "no_duplicate_chunk_text"
     severity: "warn"
+    description: "Phát hiện nội dung trùng giữa các chunk"
+
   - id: "no_stale_refund_window"
-    description: "Không được để chunk policy refund chứa cửa sổ 14 ngày (lệch so với v4 = 7 ngày)"
     severity: "halt"
+    description: "Không cho phép refund window cũ (vd 14 ngày thay vì policy v4 = 7 ngày)"
+
+  - id: "valid_chunk_text"
+    severity: "halt"
+    description: "chunk_text không được null hoặc empty"
+
+  - id: "valid_effective_date"
+    severity: "halt"
+    description: "effective_date phải parse được ISO format"
 
 freshness:
-  measured_at: "publish"  # ingest | cleaned | publish
+  measured_at: "publish"   # ingest | cleaned | publish
   sla_hours: 24
-  alert_channel: "__TODO__"
+  alert_channel: "slack:#data-alerts"
+  definition: "Thời gian từ exported_at đến thời điểm publish không vượt SLA"
 
 canonical_sources:
   - path: "data/docs/policy_refund_v4.txt"
     doc_id: "policy_refund_v4"
+    is_canonical: true
+
   - path: "data/docs/sla_p1_2026.txt"
     doc_id: "sla_p1_2026"
+    is_canonical: true
+
   - path: "data/docs/it_helpdesk_faq.txt"
     doc_id: "it_helpdesk_faq"
+    is_canonical: true
+
   - path: "data/docs/hr_leave_policy.txt"
     doc_id: "hr_leave_policy"
+    is_canonical: true
 
-# Baseline allowlist export — nhóm mở rộng doc mới phải đồng bộ cleaning_rules + contract.
 allowed_doc_ids:
   - policy_refund_v4
   - sla_p1_2026
   - it_helpdesk_faq
   - hr_leave_policy
 
-# Merit/Distinction: có thể đưa cutoff versioning vào env và tham chiếu ở đây (tránh hard-code trong code).
 policy_versioning:
   hr_leave_min_effective_date: "2026-01-01"
+  refund_policy_canonical_version: "v4"
+  strategy: "latest_effective_date + is_canonical filter"
+
+quarantine_policy:
+  enabled: true
+  store_path: "quarantine/invalid_records.jsonl"
+  approval_required: true
+  approver_role: "data_quality_owner"
+
+idempotency:
+  strategy: "hash_based_upsert"
+  key: "chunk_id = hash(doc_id + chunk_index + normalized_text)"
+  allow_reprocess: true
+
+monitoring:
+  metrics:
+    - duplicate_rate
+    - ingestion_latency
+    - freshness_lag
+    - quarantine_ratio
+  alerting:
+    duplicate_rate_threshold: 0.1
+    quarantine_ratio_threshold: 0.2
